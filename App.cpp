@@ -15,6 +15,7 @@
 #include <chrono>
 #include <iomanip>
 #include <sstream>
+#include <filesystem>
 
 #include "nlohmann/json.hpp"
 
@@ -230,6 +231,8 @@ int main()
 		strftime(buffer, sizeof(buffer), "%d-%m-%Y_%H-%M-%S", &timeinfo);
 		std::string timeString(buffer);
 		std::string fileName = "logs/data_" + timeString + ".json";
+
+		std::filesystem::create_directories("logs");
 
 		std::ofstream file(fileName);
 		file << json.dump(4);
