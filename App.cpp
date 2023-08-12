@@ -74,6 +74,8 @@ std::string RaceStateToString(unsigned int raceState)
 int main()
 {
 	HANDLE fileHandle;
+	std::chrono::seconds durationToMeasure(30);
+	auto startTime = std::chrono::steady_clock::now();
 
 	std::cout << "Waiting for shared memory connection (make sure that the game is running). Press ESC to quit..." << std::endl;
 	while (true)
@@ -162,7 +164,8 @@ int main()
 		}
 
 		// Check if a supported session type is running
-		if (localCopy->mSessionState != SESSION_RACE) continue;
+		if (localCopy->mSessionState != SESSION_RACE
+			&& localCopy->mSessionState != SESSION_QUALIFY) continue;
 
 		if (localCopy->mRaceState != RACESTATE_FINISHED
 			&& localCopy->mRaceState != RACESTATE_DISQUALIFIED
@@ -171,6 +174,7 @@ int main()
 		{
 			if (logSaved) std::cout << "New event started. Waiting event to end..." << std::endl;
 			logSaved = FALSE;
+			startTime = std::chrono::steady_clock::now();
 			continue;
 		}
 
@@ -185,6 +189,13 @@ int main()
 				stillRacing = TRUE;
 				break;
 			}
+		}
+
+		// Auto save after 30s
+		auto elapsedTime = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - startTime);
+		if (elapsedTime >= durationToMeasure)
+		{
+			stillRacing = FALSE;
 		}
 
 		if (stillRacing) continue;
@@ -230,7 +241,7 @@ int main()
 		char buffer[20];
 		strftime(buffer, sizeof(buffer), "%d-%m-%Y_%H-%M-%S", &timeinfo);
 		std::string timeString(buffer);
-		std::string fileName = "logs/data_" + timeString + ".json";
+		std::string fileName = "logs/" + SessionStateToString(localCopy->mSessionState) + "_" + timeString + ".json";
 
 		std::filesystem::create_directories("logs");
 
