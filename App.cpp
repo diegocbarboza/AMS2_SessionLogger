@@ -37,7 +37,7 @@ std::string GameStateToString(unsigned int gameState)
 		case GAME_MAX: return "GAME_MAX";
 		default: return "UNKNOWN GAME STATE";
 	}
-};
+}
 
 std::string SessionStateToString(unsigned int sessionState)
 {
@@ -53,7 +53,7 @@ std::string SessionStateToString(unsigned int sessionState)
 		case SESSION_MAX: return "SESSION_MAX";;
 		default: return "UNKNOWN SESSION STATE";
 	}
-};
+}
 
 std::string RaceStateToString(unsigned int raceState)
 {
@@ -69,14 +69,66 @@ std::string RaceStateToString(unsigned int raceState)
 		case RACESTATE_MAX: return "RACESTATE_MAX";
 		default: return "UNKNOWN RACE STATE";
 	}
-};
+}
+
+void SaveJson(SharedMemory* localCopy)
+{
+	// Save json
+	nlohmann::json json;
+	nlohmann::json raceInfo;
+	nlohmann::json raceResult;
+
+	raceInfo["LapsInEvent"] = localCopy->mLapsInEvent;
+	raceInfo["SessionDuration"] = localCopy->mSessionDuration;
+	raceInfo["SessionAdditionalLaps"] = localCopy->mSessionAdditionalLaps;
+	raceInfo["TrackLocation"] = localCopy->mTrackLocation;
+	raceInfo["TrackVariation"] = localCopy->mTrackVariation;
+	raceInfo["TrackLength"] = localCopy->mTrackLength;
+
+	for (int i = 0; i < localCopy->mNumParticipants; i++)
+	{
+		ParticipantInfo info = localCopy->mParticipantInfo[i];
+
+		nlohmann::json item;
+		item["Name"] = info.mName;
+		item["Position"] = info.mRacePosition;
+		item["BestLap"] = localCopy->mFastestLapTimes[i];
+		item["RaceState"] = RaceStateToString(localCopy->mRaceStates[i]);
+		item["CarName"] = localCopy->mCarNames[i];
+		item["Class"] = localCopy->mCarClassNames[i];
+		raceResult.push_back(item);
+	}
+
+	std::sort(raceResult.begin(), raceResult.end(), [](const nlohmann::json& a, const nlohmann::json& b)
+		{
+			return a["Position"] < b["Position"];
+		}
+	);
+
+	json["RaceInfo"] = raceInfo;
+	json["RaceResult"] = raceResult;
+
+	std::time_t currentTime = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+	std::tm timeinfo;
+	localtime_s(&timeinfo, &currentTime);
+	char buffer[20];
+	strftime(buffer, sizeof(buffer), "%d-%m-%Y_%H-%M-%S", &timeinfo);
+	std::string timeString(buffer);
+	std::string fileName = "logs/" + SessionStateToString(localCopy->mSessionState) + "_" + timeString + ".json";
+
+	std::filesystem::create_directories("logs");
+
+	std::ofstream file(fileName);
+	file << json.dump(4);
+	file.close();
+
+	std::cout << "Log saved to " << fileName << "." << std::endl;
+}
 
 int main()
 {
 	HANDLE fileHandle;
-	std::chrono::seconds durationToMeasure(30);
-	auto startTime = std::chrono::steady_clock::now();
-
+	
 	std::cout << "Waiting for shared memory connection (make sure that the game is running). Press ESC to quit..." << std::endl;
 	while (true)
 	{
@@ -98,6 +150,7 @@ int main()
 	// Get the data structure
 	const SharedMemory* sharedData = (SharedMemory*)MapViewOfFile(fileHandle, PAGE_READONLY, 0, 0, sizeof(SharedMemory));
 	SharedMemory* localCopy = new SharedMemory;
+	SharedMemory* prevLocalCopy = new SharedMemory;
 	if (sharedData == NULL)
 	{
 		printf("Could not map view of file (%d).\n", GetLastError());
@@ -113,14 +166,13 @@ int main()
 		return 1;
 	}
 
-
 	unsigned int updateIndex(0);
 	unsigned int indexChange(0);
 
-	bool logSaved = FALSE;
-
 	LARGE_INTEGER lastDisplayUpdate;
 	QueryPerformanceCounter(&lastDisplayUpdate);
+
+	bool initialized = FALSE;
 
 	std::cout << "Waiting for race to end. Press ESC to quit..." << std::endl;
 
@@ -163,103 +215,31 @@ int main()
 			continue;
 		}
 
-		// Check if a supported session type is running
-		if (localCopy->mSessionState != SESSION_RACE
-			&& localCopy->mSessionState != SESSION_QUALIFY) continue;
-
-		if (localCopy->mRaceState != RACESTATE_FINISHED
-			&& localCopy->mRaceState != RACESTATE_DISQUALIFIED
-			&& localCopy->mRaceState != RACESTATE_RETIRED
-			&& localCopy->mRaceState != RACESTATE_DNF) 
+		if (initialized)
 		{
-			if (logSaved) std::cout << "New event started. Waiting event to end..." << std::endl;
-			logSaved = FALSE;
-			startTime = std::chrono::steady_clock::now();
-			continue;
-		}
-
-		bool stillRacing = FALSE;
-		for (int i = 0; i < localCopy->mNumParticipants; i++)
-		{
-			if (localCopy->mRaceStates[i] != RACESTATE_FINISHED
-				&& localCopy->mRaceStates[i] != RACESTATE_DISQUALIFIED
-				&& localCopy->mRaceStates[i] != RACESTATE_RETIRED
-				&& localCopy->mRaceStates[i] != RACESTATE_DNF)
+			if (localCopy->mRaceState == RACESTATE_INVALID
+				&& prevLocalCopy->mRaceState != RACESTATE_INVALID)
 			{
-				stillRacing = TRUE;
-				break;
+				// Check if a supported session type is running
+				if (prevLocalCopy->mSessionState == SESSION_RACE
+					|| prevLocalCopy->mSessionState == SESSION_QUALIFY)
+				{
+					SaveJson(prevLocalCopy);
+				}
 			}
 		}
 
-		// Auto save after 30s
-		auto elapsedTime = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - startTime);
-		if (elapsedTime >= durationToMeasure)
-		{
-			stillRacing = FALSE;
-		}
+		memcpy(prevLocalCopy, localCopy, sizeof(SharedMemory));		
+		initialized = TRUE;
 
-		if (stillRacing) continue;
-		if (logSaved) continue;
-
-		// Save json
-		nlohmann::json json;
-		nlohmann::json raceInfo;
-		nlohmann::json raceResult;			
-
-		raceInfo["LapsInEvent"] = localCopy->mLapsInEvent;
-		raceInfo["SessionDuration"] = localCopy->mSessionDuration;
-		raceInfo["SessionAdditionalLaps"] = localCopy->mSessionAdditionalLaps;
-		raceInfo["TrackLocation"] = localCopy->mTrackLocation;
-		raceInfo["TrackVariation"] = localCopy->mTrackVariation;
-		raceInfo["TrackLength"] = localCopy->mTrackLength;		
-
-		for (int i = 0; i < localCopy->mNumParticipants; i++)
-		{
-			ParticipantInfo info = localCopy->mParticipantInfo[i];
-
-			nlohmann::json item;
-			item["Name"] = info.mName;
-			item["Position"] = info.mRacePosition;
-			item["BestLap"] = localCopy->mFastestLapTimes[i];
-			item["RaceState"] = RaceStateToString(localCopy->mRaceStates[i]);
-			item["CarName"] = localCopy->mCarNames[i];
-			item["Class"] = localCopy->mCarClassNames[i];
-			raceResult.push_back(item);
-		}
-
-		std::sort(raceResult.begin(), raceResult.end(), [](const nlohmann::json& a, const nlohmann::json& b)
-		{
-			return a["Position"] < b["Position"];
-		});
-
-		json["RaceInfo"] = raceInfo;
-		json["RaceResult"] = raceResult;
-
-		std::time_t currentTime = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-		std::tm timeinfo;
-		localtime_s(&timeinfo, &currentTime);		
-		char buffer[20];
-		strftime(buffer, sizeof(buffer), "%d-%m-%Y_%H-%M-%S", &timeinfo);
-		std::string timeString(buffer);
-		std::string fileName = "logs/" + SessionStateToString(localCopy->mSessionState) + "_" + timeString + ".json";
-
-		std::filesystem::create_directories("logs");
-
-		std::ofstream file(fileName);
-		file << json.dump(4);
-		file.close();
-
-		std::cout << "Log saved to " << fileName << "." << std::endl;
-		
-		logSaved = TRUE;
-
-		QueryPerformanceCounter( &lastDisplayUpdate );
+		QueryPerformanceCounter(&lastDisplayUpdate);
 	}
 
 	// Cleanup
-	UnmapViewOfFile( sharedData );
-	CloseHandle( fileHandle );
+	UnmapViewOfFile(sharedData);
+	CloseHandle(fileHandle);
 	delete localCopy;
+	delete prevLocalCopy;
 
 	return 0;
 }
